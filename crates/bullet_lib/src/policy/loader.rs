@@ -1,17 +1,9 @@
-use std::{
-    fs::File,
-    io::BufReader,
-    sync::mpsc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{fs::File, io::{BufReader, Read}, sync::mpsc, time::{SystemTime, UNIX_EPOCH}};
 
-use crate::{
-    default::loader::DataLoader,
-    game::formats::montyformat::{chess::Position, MontyFormat},
-};
+use crate::{default::formats::montyformat::chess::Position, value::loader::DataLoader};
 
-use super::move_maps::MAX_MOVES;
-
+#[repr(C)]
+#[repr(align(64))]
 #[derive(Clone, Copy)]
 pub struct DecompressedData {
     pub pos: Position,
@@ -51,23 +43,21 @@ impl DataLoader<DecompressedData> for PolicyDataLoader {
         let buffer_size = self.buffer_size;
 
         std::thread::spawn(move || {
-            let mut reusable_buffer = Vec::new();
+            let mut reusable_buffer = [0u8; std::mem::size_of::<DecompressedData>()];
 
             'dataloading: loop {
                 let mut reader = BufReader::new(File::open(file_path.as_str()).unwrap());
 
-                while let Ok(game) = MontyFormat::deserialise_from(&mut reader) {
+                while reader.read_exact(&mut reusable_buffer).is_ok() {
                     if buffer_msg_receiver.try_recv().unwrap_or(false) {
                         break 'dataloading;
                     }
 
-                    parse_into_buffer(game, &mut reusable_buffer);
+                    let data: DecompressedData = unsafe { std::mem::transmute(reusable_buffer) };
 
-                    if shuffle_buffer.len() + reusable_buffer.len() < shuffle_buffer.capacity() {
-                        shuffle_buffer.extend_from_slice(&reusable_buffer);
-                    } else {
-                        let diff = shuffle_buffer.capacity() - shuffle_buffer.len();
-                        shuffle_buffer.extend_from_slice(&reusable_buffer[..diff]);
+                    shuffle_buffer.push(data);
+
+                    if shuffle_buffer.len() >= shuffle_buffer.capacity() {
 
                         shuffle(&mut shuffle_buffer);
 
@@ -97,7 +87,7 @@ impl DataLoader<DecompressedData> for PolicyDataLoader {
             }
         }
 
-        drop(buffer_receiver);
+        //drop(buffer_receiver);
     }
 }
 
@@ -107,29 +97,6 @@ fn shuffle(data: &mut [DecompressedData]) {
     for i in (0..data.len()).rev() {
         let idx = rng.rng() as usize % (i + 1);
         data.swap(idx, i);
-    }
-}
-
-fn parse_into_buffer(game: MontyFormat, buffer: &mut Vec<DecompressedData>) {
-    buffer.clear();
-
-    let mut pos = game.startpos;
-    let castling = game.castling;
-
-    for data in game.moves {
-        if let Some(dist) = data.visit_distribution.as_ref() {
-            if dist.len() > 1 && dist.len() <= MAX_MOVES {
-                let mut policy_data = DecompressedData { pos, moves: [(0, 0); 108], num: dist.len() };
-
-                for (i, (mov, visits)) in dist.iter().enumerate() {
-                    policy_data.moves[i] = (u16::from(*mov), *visits as u16);
-                }
-
-                buffer.push(policy_data);
-            }
-        }
-
-        pos.make(data.best_move, &castling);
     }
 }
 
